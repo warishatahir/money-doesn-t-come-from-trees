@@ -114,8 +114,8 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Spent", f"${spending['spent'].sum():,.2f}")
 c2.metric("Earned", f"${income:,.2f}")
 c3.metric("Left over", f"${income - spending['spent'].sum():,.2f}")
-c4.metric("Coffee runs", f"{len(coffee)}", f"${coffee['spent'].sum():,.2f}",
-          delta_color="off")
+c4.metric("Coffee", f"${coffee['spent'].sum():,.2f}")
+c4.caption(f"{len(coffee)} runs")
 
 # By category
 st.subheader("By category")
