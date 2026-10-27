@@ -28,11 +28,28 @@ h1, h2, h3 { font-family: 'Fraunces', serif !important; font-variation-settings:
 h1 { font-size: 3rem !important; letter-spacing: -0.02em; }
 .stApp { background: #FFF5F7; }
 section[data-testid="stSidebar"] { background: #FFE3EA; }
+header[data-testid="stHeader"] { background: #FFF5F7; }
+.stApp p, .stApp label, .stApp li, .stApp summary, .stApp small,
+[data-testid="stWidgetLabel"] *, [data-testid="stMetricLabel"] *,
+[data-testid="stCaptionContainer"] *, [data-testid="stExpander"] summary * { color: #3A2A30 !important; }
+[data-testid="stCaptionContainer"] * { color: #7A5F68 !important; }
+[data-testid="stFileUploaderDropzone"] { background: white !important; }
+[data-testid="stFileUploaderDropzone"] * { color: #3A2A30 !important; }
+[data-testid="stFileUploaderDropzone"] button { background: #D9577F !important; border: none !important; }
+[data-testid="stFileUploaderDropzone"] button * { color: white !important; }
+[data-testid="stExpander"] details { background: white; border-color: #F6C6D4 !important; border-radius: 16px; }
+.stApp div[data-baseweb="select"] > div, .stApp input { background: white !important; color: #3A2A30 !important; }
 div[data-testid="stMetric"] {
   background: white; border: 2px solid #F6C6D4; border-radius: 22px; padding: 18px 20px;
 }
 div[data-testid="stMetricValue"] { font-family: 'Fraunces', serif; color: #3A2A30; }
 .sub { color: #7A5F68; font-size: 1.1rem; margin-top: -0.6rem; }
+.top5 { width: 100%; border-collapse: collapse; background: white; border-radius: 16px;
+        overflow: hidden; box-shadow: 0 0 0 2px #F6C6D4; margin-bottom: 1rem; }
+.top5 th, .top5 td { padding: 12px 18px; text-align: left; color: #3A2A30; border: none; }
+.top5 th { background: #FFE3EA; font-weight: 800; }
+.top5 tr + tr td { border-top: 1px solid #F6DCE3; }
+.top5 td:nth-child(2), .top5 td:nth-child(3), .top5 th:nth-child(2), .top5 th:nth-child(3) { text-align: right; }
 .big-save { font-family: 'Fraunces', serif; font-size: 2.6rem; color: #D9577F; line-height: 1.1; }
 .stickers { display: flex; flex-wrap: wrap; gap: 26px; margin: 10px 0 40px; }
 .sticker {
@@ -223,7 +240,7 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("spent", f"${spent:,.2f}")
 c2.metric("earned", f"${earned:,.2f}")
 c3.metric("left over", f"${earned - spent:,.2f}")
-c4.metric("coffee ☕", f"${coffee_spent:,.2f}")
+c4.metric("coffee", f"${coffee_spent:,.2f}")
 c4.caption(f"{coffee_runs} runs")
 
 # --- by category -----------------------------------------------------------
@@ -233,13 +250,15 @@ color = alt.Color("category:N", legend=None,
                   scale=alt.Scale(domain=list(CATEGORY_COLORS), range=list(CATEGORY_COLORS.values())))
 st.altair_chart(
     alt.Chart(by_cat).mark_bar(cornerRadiusEnd=10, height=26).encode(
-        x=alt.X("spent:Q", title=None, axis=alt.Axis(format="$,.0f", grid=False)),
+        x=alt.X("spent:Q", title=None, axis=alt.Axis(format="$,.0f", grid=False, tickCount=6)),
         y=alt.Y("category:N", sort="-x", title=None, axis=alt.Axis(labelFontSize=14, labelLimit=200)),
         color=color,
         tooltip=["category", alt.Tooltip("spent:Q", format="$,.2f"), "purchases",
                  alt.Tooltip("pct:Q", title="% of spending")],
-    ).properties(height=alt.Step(40)).configure_view(stroke=None),
-    width="stretch",
+    ).properties(height=alt.Step(40)).configure(background="#FFF5F7")
+     .configure_view(strokeWidth=0)
+     .configure_axis(labelColor="#3A2A30", titleColor="#3A2A30", domain=False, ticks=False),
+    width="stretch", theme=None,
 )
 
 # --- by month --------------------------------------------------------------
@@ -255,20 +274,29 @@ if by_month["month"].nunique() > 1:
                             scale=alt.Scale(domain=list(CATEGORY_COLORS),
                                             range=list(CATEGORY_COLORS.values()))),
             tooltip=["month_label", "category", alt.Tooltip("spent:Q", format="$,.2f")],
-        ).properties(height=340).configure_view(stroke=None),
-        width="stretch",
+        ).properties(height=340).configure(background="#FFF5F7")
+         .configure_view(strokeWidth=0)
+         .configure_axis(labelColor="#3A2A30", titleColor="#3A2A30",
+                         domain=False, ticks=False, gridColor="#F6DCE3")
+         .configure_legend(labelColor="#3A2A30"),
+        width="stretch", theme=None,
     )
 
 # --- top places --------------------------------------------------------------
-st.header("my top 5 places")
-st.dataframe(sql(SQL_TOP_PLACES), hide_index=True, width="stretch",
-             column_config={"total": st.column_config.NumberColumn(format="$%.2f")})
+st.header("top 5 places")
+top5 = sql(SQL_TOP_PLACES)
+rows = "".join(
+    f"<tr><td>{r.place}</td><td>{r.visits}</td><td>${r.total:,.2f}</td></tr>"
+    for r in top5.itertuples()
+)
+st.markdown(f'<table class="top5"><tr><th>place</th><th>visits</th><th>total</th></tr>{rows}</table>',
+            unsafe_allow_html=True)
 
 # --- what if ------------------------------------------------------------------
-st.header("what if…")
+st.header("what if")
 left, right = st.columns(2)
 with left:
-    st.subheader("☕ the coffee-at-home challenge")
+    st.subheader("making coffee at home")
     treat_days = st.multiselect("Treat days (coffee out allowed)",
                                 ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], default=["Fri"])
     home_cup = st.number_input("Cost of a coffee made at home", value=0.75, step=0.25, format="%.2f")
@@ -281,7 +309,7 @@ with left:
     st.caption(f"Right now: about {runs_month:.0f} coffee runs a month at \\${avg_cup:.2f} each. "
                f"That's \\${coffee_save:,.0f} saved a month.")
 with right:
-    st.subheader("🥪 the packed-lunch era")
+    st.subheader("packing lunch")
     cut = st.slider("Cut eating out by", 0, 100, 50, step=10, format="%d%%")
     lunch_save = float(s.eating_out) * per_month * cut / 100
     st.markdown(f'<div class="big-save">${lunch_save * 12:,.0f} a year</div>', unsafe_allow_html=True)
@@ -292,17 +320,15 @@ st.markdown(f"**Both together: \\${(coffee_save + lunch_save) * 12:,.0f} a year.
 # --- stickers ------------------------------------------------------------------
 stickers = []
 if coffee_spent * per_month > 60:
-    stickers.append("girl, you're spending too much on coffee ☕💅")
+    stickers.append("girl, you're spending too much on coffee ☕")
 top = by_cat.iloc[0]["category"] if not by_cat.empty else None
-if top == "Eating out":
-    stickers.append("packed lunch era incoming 🥪✨")
 if earned - spent < 0:
-    stickers.append("spent more than you made, bestie 🫠")
+    stickers.append("spent more than you made this month")
 else:
-    stickers.append("saving queen behavior 👑")
+    stickers.append("you saved money this month")
 if len(treat_days) == 1:
     full = {"Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday", "Thu": "Thursday",
             "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday"}[treat_days[0]]
-    stickers.append(f"coffee out on {full}s only 🎀")
+    stickers.append(f"coffee out on {full}s only")
 st.markdown('<div class="stickers">' + "".join(f'<div class="sticker">{t}</div>' for t in stickers)
             + "</div>", unsafe_allow_html=True)
