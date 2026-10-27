@@ -1,28 +1,66 @@
-# Spending tracker: upload a bank CSV and see where the money goes.
-# Run locally with:  streamlit run app.py
+# money doesn't come from trees 🌱
+# A spending tracker: Python loads the CSV, SQL (DuckDB) does the analysis,
+# Streamlit shows it. Run locally with:  streamlit run app.py
 
 import io
+import duckdb
 import pandas as pd
 import altair as alt
 import streamlit as st
 
-st.set_page_config(page_title="Where my money goes", page_icon="☕", layout="wide")
+st.set_page_config(page_title="money doesn't come from trees", page_icon="🌱", layout="wide")
 
 # ---------------------------------------------------------------------------
-# 1. Category rules. First match wins, so order matters.
-#    To recategorize a store, move its keyword to a different list.
+# Look and feel
+# ---------------------------------------------------------------------------
+ROSE, COCOA, BLUSH = "#D9577F", "#3A2A30", "#FFF5F7"
+CATEGORY_COLORS = {
+    "Coffee": "#B07D62", "Eating out": "#F29CB4", "Groceries": "#8DB596",
+    "Transportation": "#9CC9E8", "Shopping & beauty": "#C9A7E8", "Subscriptions": "#F6D47A",
+    "Outings": "#F7B58A", "Friends & MSA": "#E8A0A0", "Other": "#C8C0C3",
+}
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,600,100&family=Nunito:wght@400;600;800&display=swap');
+html, body, [class*="css"], .stMarkdown, p, label { font-family: 'Nunito', sans-serif; }
+h1, h2, h3 { font-family: 'Fraunces', serif !important; font-variation-settings: 'SOFT' 100; color: #3A2A30 !important; }
+h1 { font-size: 3rem !important; letter-spacing: -0.02em; }
+.stApp { background: #FFF5F7; }
+section[data-testid="stSidebar"] { background: #FFE3EA; }
+div[data-testid="stMetric"] {
+  background: white; border: 2px solid #F6C6D4; border-radius: 22px; padding: 18px 20px;
+}
+div[data-testid="stMetricValue"] { font-family: 'Fraunces', serif; color: #3A2A30; }
+.sub { color: #7A5F68; font-size: 1.1rem; margin-top: -0.6rem; }
+.big-save { font-family: 'Fraunces', serif; font-size: 2.6rem; color: #D9577F; line-height: 1.1; }
+.stickers { display: flex; flex-wrap: wrap; gap: 26px; margin: 10px 0 40px; }
+.sticker {
+  background: white; border: 5px solid white; border-radius: 999px; padding: 14px 24px;
+  font-weight: 800; font-size: 1.15rem; color: #3A2A30;
+  box-shadow: 0 6px 0 rgba(58, 42, 48, 0.12), 0 0 0 2px #F6C6D4;
+}
+.sticker:nth-child(1) { transform: rotate(-4deg); background: #FFD9E4; }
+.sticker:nth-child(2) { transform: rotate(3deg);  background: #E3F1E5; }
+.sticker:nth-child(3) { transform: rotate(-2deg); background: #FFF1C9; }
+.sticker:nth-child(4) { transform: rotate(4deg);  background: #EDE3FA; }
+</style>
+""", unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------------
+# Category rules, stored as a table so SQL can join on it.
+# Lower priority number wins when two keywords match.
 # ---------------------------------------------------------------------------
 RULES = {
     "Transfers": ["transfer"],
-    "Tuition": ["tuition", "GEO WASHINGTON U"],
+    "Tuition": ["tuition", "geo washington u"],
     "Income": ["payroll", "cashreward", "rewards", "interest"],
     "Refunds": ["refund", "reimburse"],
     "Coffee": ["coffee", "peet", "cuppi", "dunkin", "dd/br", "arkibuna", "shotted",
                "cafein", "starbucks"],
     "Eating out": ["paris baguette", "point chaud", "chick-fil-a", "absurd", "taco bell",
                    "panera", "2200 penn", "layered", "ballywhack", "dinner", "wawa", "7-eleven"],
-    "Groceries": ["walmart", "wal-mart", "whole", "wholefds", "food lion", "safeway",
-                  "trader joe"],
+    "Groceries": ["walmart", "wal-mart", "whole", "wholefds", "food lion", "safeway", "trader joe"],
     "Transportation": ["metro", "shell", "parking", "gas"],
     "Shopping & beauty": ["ulta", "barnes", "tiktok", "cvs", "h&m", "primark"],
     "Subscriptions": ["subscription", "apple.com", "anthropic", "claude", "icloud"],
@@ -30,134 +68,241 @@ RULES = {
     "Friends & MSA": ["apple cash", "venmo", "zelle"],
 }
 NOT_SPENDING = ["Transfers", "Tuition", "Income", "Refunds"]
-ALL_CATEGORIES = list(RULES) + ["Other"]
-
-
-def categorize(description: str) -> str:
-    text = str(description).lower()
-    for category, keywords in RULES.items():
-        if any(k.lower() in text for k in keywords):
-            return category
-    return "Other"
-
+rules = pd.DataFrame(
+    [(kw, cat, p) for p, (cat, kws) in enumerate(RULES.items()) for kw in kws],
+    columns=["keyword", "category", "priority"],
+)
 
 # ---------------------------------------------------------------------------
-# 2. Loading. Works with this app's simple format (date, description, amount)
-#    and with Bank of America CSV downloads, which have summary lines on top.
+# SQL. Each query is a named string so the app can show it on screen.
 # ---------------------------------------------------------------------------
+SQL_CATEGORIZE = """
+-- Match every transaction to a keyword rule; if several match, keep the
+-- highest-priority one (window function + QUALIFY).
+SELECT t.id, t.date, t.description, t.amount,
+       COALESCE(r.category, 'Other') AS category
+FROM transactions t
+LEFT JOIN rules r
+  ON lower(t.description) LIKE '%' || r.keyword || '%'
+QUALIFY ROW_NUMBER() OVER (PARTITION BY t.id ORDER BY r.priority) = 1
+ORDER BY t.date
+"""
+
+SQL_SPENDING_VIEW = f"""
+-- Everyday spending only: money out, minus transfers, tuition, etc.
+CREATE OR REPLACE VIEW spending AS
+SELECT date, description, category,
+       -amount AS spent,
+       date_trunc('month', date) AS month,
+       strftime(date, '%B ''%y') AS month_label,
+       dayname(date) AS weekday
+FROM categorized
+WHERE amount < 0
+  AND category NOT IN ({", ".join(f"'{c}'" for c in NOT_SPENDING)})
+"""
+
+SQL_SUMMARY = """
+-- Headline numbers, plus how many days the data covers
+SELECT
+  (SELECT SUM(spent) FROM spending)                                AS spent,
+  (SELECT COALESCE(SUM(amount), 0) FROM categorized
+     WHERE category = 'Income')                                    AS earned,
+  (SELECT COUNT(*) FROM spending WHERE category = 'Coffee')        AS coffee_runs,
+  (SELECT COALESCE(SUM(spent), 0) FROM spending
+     WHERE category = 'Coffee')                                    AS coffee_spent,
+  (SELECT COALESCE(SUM(spent), 0) FROM spending
+     WHERE category = 'Eating out')                                AS eating_out,
+  (SELECT date_diff('day', MIN(date), MAX(date)) + 1 FROM categorized) AS days
+"""
+
+SQL_BY_CATEGORY = """
+-- Total per category and its share of all spending
+SELECT category,
+       ROUND(SUM(spent), 2) AS spent,
+       COUNT(*) AS purchases,
+       ROUND(100 * SUM(spent) / SUM(SUM(spent)) OVER (), 1) AS pct
+FROM spending
+GROUP BY category
+ORDER BY spent DESC
+"""
+
+SQL_BY_MONTH = """
+-- Category totals per calendar month
+SELECT month, month_label, category, ROUND(SUM(spent), 2) AS spent
+FROM spending
+GROUP BY month, month_label, category
+ORDER BY month
+"""
+
+SQL_TOP_PLACES = """
+-- Where I go most, ranked by total spent
+SELECT description AS place, COUNT(*) AS visits, ROUND(SUM(spent), 2) AS total
+FROM spending
+GROUP BY description
+ORDER BY total DESC
+LIMIT 5
+"""
+
+
 def load_csv(raw: bytes) -> pd.DataFrame:
+    """Read a simple date/description/amount CSV or a Bank of America download."""
     lines = raw.decode("utf-8-sig", errors="ignore").splitlines()
-    header_row = next(
-        (i for i, line in enumerate(lines)
-         if "date" in line.lower() and "description" in line.lower()),
-        0,
-    )
-    df = pd.read_csv(io.StringIO("\n".join(lines[header_row:])))
+    header = next((i for i, l in enumerate(lines)
+                   if "date" in l.lower() and "description" in l.lower()), 0)
+    df = pd.read_csv(io.StringIO("\n".join(lines[header:])))
     df.columns = [c.strip().lower() for c in df.columns]
-    df = df[["date", "description", "amount"]].dropna(subset=["amount"])
-    df["amount"] = pd.to_numeric(
-        df["amount"].astype(str).str.replace(r"[$,]", "", regex=True), errors="coerce"
-    )
+    df = df[["date", "description", "amount"]]
+    df["amount"] = pd.to_numeric(df["amount"].astype(str).str.replace(r"[$,]", "", regex=True),
+                                 errors="coerce")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date", "amount"])
-    df["category"] = df["description"].apply(categorize)
-    return df.sort_values("date").reset_index(drop=True)
+    df = df.dropna(subset=["date", "amount"]).reset_index(drop=True)
+    df["id"] = df.index
+    return df
 
 
 # ---------------------------------------------------------------------------
-# 3. Page
+# Sidebar
 # ---------------------------------------------------------------------------
-st.title("Where my money goes")
-
 with st.sidebar:
-    st.header("Your data")
+    st.header("your data")
     uploaded = st.file_uploader("Upload a bank CSV", type="csv")
-    st.caption("Needs date, description and amount columns. "
-               "Spending is negative, money in is positive. "
-               "Files stay in this session and are not saved.")
+    st.caption("Needs date, description and amount columns. Spending is negative. "
+               "Files stay in this session and are never saved.")
+    show_sql = st.toggle("Show the SQL behind each section", value=False)
 
-if uploaded is not None:
-    data = load_csv(uploaded.getvalue())
-    st.caption(f"Showing {uploaded.name}")
-else:
-    with open("sample_data.csv", "rb") as f:
-        data = load_csv(f.read())
-    st.info("Showing made-up sample data. Upload your own CSV in the sidebar.")
-
-if data.empty:
-    st.error("No transactions found. Check that the file has date, description "
-             "and amount columns.")
+raw = uploaded.getvalue() if uploaded else open("sample_data.csv", "rb").read()
+transactions = load_csv(raw)
+if transactions.empty:
+    st.error("No transactions found. Check that the file has date, description and amount columns.")
     st.stop()
 
-# Let the user fix categories by hand. Changes apply to everything below.
+con = duckdb.connect()
+con.register("transactions", transactions)
+con.register("rules", rules)
+
+
+def sql(query: str) -> pd.DataFrame:
+    if show_sql:
+        st.code(query.strip(), language="sql")
+    return con.execute(query).df()
+
+
+# ---------------------------------------------------------------------------
+# Page
+# ---------------------------------------------------------------------------
+st.title("money doesn't come from trees 🌱")
+st.markdown('<p class="sub">a little audit of where it actually went</p>', unsafe_allow_html=True)
+if not uploaded:
+    st.info("Showing made-up sample data. Upload your own CSV in the sidebar.")
+
+categorized = sql(SQL_CATEGORIZE)
 with st.expander("Fix categories"):
     st.caption("Click a category to change it. Everything below updates.")
-    data = st.data_editor(
-        data,
+    categorized = st.data_editor(
+        categorized,
         column_config={
-            "category": st.column_config.SelectboxColumn("category", options=ALL_CATEGORIES),
+            "id": None,
+            "category": st.column_config.SelectboxColumn(
+                "category", options=list(RULES) + ["Other"]),
             "date": st.column_config.DateColumn("date", format="MMM D"),
             "amount": st.column_config.NumberColumn("amount", format="$%.2f"),
         },
-        disabled=["date", "description", "amount"],
-        hide_index=True,
-        width="stretch",
+        disabled=["date", "description", "amount"], hide_index=True, width="stretch",
     )
+con.register("categorized", categorized)
+con.execute(SQL_SPENDING_VIEW)
+if show_sql:
+    st.code(SQL_SPENDING_VIEW.strip(), language="sql")
 
-spending = data[(data["amount"] < 0) & (~data["category"].isin(NOT_SPENDING))].copy()
-spending["spent"] = -spending["amount"]
-income = data.loc[data["category"] == "Income", "amount"].sum()
-coffee = spending[spending["category"] == "Coffee"]
+s = sql(SQL_SUMMARY).iloc[0]
+spent, earned, days = float(s.spent or 0), float(s.earned), int(s.days)
+coffee_runs, coffee_spent = int(s.coffee_runs), float(s.coffee_spent)
+per_month = 30.4 / days
 
-# Headline numbers
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Spent", f"${spending['spent'].sum():,.2f}")
-c2.metric("Earned", f"${income:,.2f}")
-c3.metric("Left over", f"${income - spending['spent'].sum():,.2f}")
-c4.metric("Coffee", f"${coffee['spent'].sum():,.2f}")
-c4.caption(f"{len(coffee)} runs")
+c1.metric("spent", f"${spent:,.2f}")
+c2.metric("earned", f"${earned:,.2f}")
+c3.metric("left over", f"${earned - spent:,.2f}")
+c4.metric("coffee ☕", f"${coffee_spent:,.2f}")
+c4.caption(f"{coffee_runs} runs")
 
-# By category
-st.subheader("By category")
-by_cat = spending.groupby("category", as_index=False)["spent"].sum()
-chart = (
-    alt.Chart(by_cat)
-    .mark_bar(cornerRadiusEnd=3)
-    .encode(
-        x=alt.X("spent:Q", title="Dollars"),
-        y=alt.Y("category:N", sort="-x", title=None),
-        tooltip=["category", alt.Tooltip("spent:Q", format="$,.2f")],
-    )
-    .properties(height=320)
-)
-st.altair_chart(chart, width="stretch")
-
-# By month (only useful once there's more than one month)
-spending["month"] = spending["date"].dt.to_period("M").astype(str)
-if spending["month"].nunique() > 1:
-    st.subheader("Month by month")
-    by_month = spending.groupby(["month", "category"], as_index=False)["spent"].sum()
-    st.altair_chart(
-        alt.Chart(by_month).mark_bar().encode(
-            x=alt.X("month:N", title=None),
-            y=alt.Y("spent:Q", title="Dollars"),
-            color=alt.Color("category:N", title=None),
-            tooltip=["month", "category", alt.Tooltip("spent:Q", format="$,.2f")],
-        ).properties(height=320),
-        width="stretch",
-    )
-
-# Look inside one category
-st.subheader("Look inside a category")
-pick = st.selectbox("Category", sorted(spending["category"].unique()))
-detail = spending[spending["category"] == pick][["date", "description", "spent"]]
-st.dataframe(
-    detail,
-    column_config={
-        "date": st.column_config.DateColumn("date", format="MMM D"),
-        "spent": st.column_config.NumberColumn("spent", format="$%.2f"),
-    },
-    hide_index=True,
+# --- by category -----------------------------------------------------------
+st.header("where it went")
+by_cat = sql(SQL_BY_CATEGORY)
+color = alt.Color("category:N", legend=None,
+                  scale=alt.Scale(domain=list(CATEGORY_COLORS), range=list(CATEGORY_COLORS.values())))
+st.altair_chart(
+    alt.Chart(by_cat).mark_bar(cornerRadiusEnd=10, height=26).encode(
+        x=alt.X("spent:Q", title=None, axis=alt.Axis(format="$,.0f", grid=False)),
+        y=alt.Y("category:N", sort="-x", title=None, axis=alt.Axis(labelFontSize=14, labelLimit=200)),
+        color=color,
+        tooltip=["category", alt.Tooltip("spent:Q", format="$,.2f"), "purchases",
+                 alt.Tooltip("pct:Q", title="% of spending")],
+    ).properties(height=alt.Step(40)).configure_view(stroke=None),
     width="stretch",
 )
-st.caption(f"{len(detail)} purchases, ${detail['spent'].sum():,.2f} total")
+
+# --- by month --------------------------------------------------------------
+by_month = sql(SQL_BY_MONTH)
+if by_month["month"].nunique() > 1:
+    st.header("month by month")
+    st.altair_chart(
+        alt.Chart(by_month).mark_bar(cornerRadiusTopLeft=8, cornerRadiusTopRight=8, size=70).encode(
+            x=alt.X("month_label:N", title=None,
+                    sort=alt.SortField("month"), axis=alt.Axis(labelAngle=0, labelFontSize=14)),
+            y=alt.Y("sum(spent):Q", title=None, axis=alt.Axis(format="$,.0f")),
+            color=alt.Color("category:N", title=None,
+                            scale=alt.Scale(domain=list(CATEGORY_COLORS),
+                                            range=list(CATEGORY_COLORS.values()))),
+            tooltip=["month_label", "category", alt.Tooltip("spent:Q", format="$,.2f")],
+        ).properties(height=340).configure_view(stroke=None),
+        width="stretch",
+    )
+
+# --- top places --------------------------------------------------------------
+st.header("my top 5 places")
+st.dataframe(sql(SQL_TOP_PLACES), hide_index=True, width="stretch",
+             column_config={"total": st.column_config.NumberColumn(format="$%.2f")})
+
+# --- what if ------------------------------------------------------------------
+st.header("what if…")
+left, right = st.columns(2)
+with left:
+    st.subheader("☕ the coffee-at-home challenge")
+    treat_days = st.multiselect("Treat days (coffee out allowed)",
+                                ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], default=["Fri"])
+    home_cup = st.number_input("Cost of a coffee made at home", value=0.75, step=0.25, format="%.2f")
+    runs_month = coffee_runs * per_month
+    avg_cup = coffee_spent / coffee_runs if coffee_runs else 0
+    treat_runs = min(len(treat_days) * 4.35, runs_month)
+    new_cost = treat_runs * avg_cup + (runs_month - treat_runs) * home_cup
+    coffee_save = max(coffee_spent * per_month - new_cost, 0)
+    st.markdown(f'<div class="big-save">${coffee_save * 12:,.0f} a year</div>', unsafe_allow_html=True)
+    st.caption(f"Right now: about {runs_month:.0f} coffee runs a month at \\${avg_cup:.2f} each. "
+               f"That's \\${coffee_save:,.0f} saved a month.")
+with right:
+    st.subheader("🥪 the packed-lunch era")
+    cut = st.slider("Cut eating out by", 0, 100, 50, step=10, format="%d%%")
+    lunch_save = float(s.eating_out) * per_month * cut / 100
+    st.markdown(f'<div class="big-save">${lunch_save * 12:,.0f} a year</div>', unsafe_allow_html=True)
+    st.caption(f"Eating out is about \\${float(s.eating_out) * per_month:,.0f} a month right now.")
+
+st.markdown(f"**Both together: \\${(coffee_save + lunch_save) * 12:,.0f} a year.**")
+
+# --- stickers ------------------------------------------------------------------
+stickers = []
+if coffee_spent * per_month > 60:
+    stickers.append("girl, you're spending too much on coffee ☕💅")
+top = by_cat.iloc[0]["category"] if not by_cat.empty else None
+if top == "Eating out":
+    stickers.append("packed lunch era incoming 🥪✨")
+if earned - spent < 0:
+    stickers.append("spent more than you made, bestie 🫠")
+else:
+    stickers.append("saving queen behavior 👑")
+if len(treat_days) == 1:
+    full = {"Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday", "Thu": "Thursday",
+            "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday"}[treat_days[0]]
+    stickers.append(f"coffee out on {full}s only 🎀")
+st.markdown('<div class="stickers">' + "".join(f'<div class="sticker">{t}</div>' for t in stickers)
+            + "</div>", unsafe_allow_html=True)

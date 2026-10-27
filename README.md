@@ -1,16 +1,19 @@
-# Where my money goes
+# money doesn't come from trees 🌱
 
-A small Streamlit app that turns a bank CSV into a spending breakdown.
-I built it after analyzing my own statements and realizing a third of my
-spending was food and coffee.
+A spending tracker I built after analyzing my own bank statements and
+realizing a third of my spending was food and coffee.
 
 **What it does**
-- Reads a CSV of transactions (including Bank of America downloads)
-- Sorts each purchase into a category with keyword rules
+- Reads a CSV of transactions, including Bank of America downloads
+- Categorizes purchases in SQL: a keyword rules table joined with `LIKE`,
+  using a window function (`ROW_NUMBER` + `QUALIFY`) to keep the highest-priority match
+- Runs the analysis as SQL queries in DuckDB: category totals, share of total
+  spending (window function), monthly trends, and top merchants.
+  Turn on "Show the SQL" in the sidebar to see every query
 - Lets you fix any category by hand, and every chart updates
-- Shows totals, a coffee tracker, month-by-month trends, and a drill-down by category
+- "What if" calculators for cutting coffee runs and eating out
 
-**Tech:** Python, pandas, Altair, Streamlit
+**Tech:** SQL (DuckDB), Python, pandas, Altair, Streamlit
 
 The public version shows made-up sample data. Uploaded files stay in the
 browser session and are never saved.
